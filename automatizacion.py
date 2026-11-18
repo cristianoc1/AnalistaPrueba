@@ -1,119 +1,123 @@
-"""Guía las consultas manuales y registra los PDF descargados desde la DIAN."""
+"""Automatiza la consulta pública por CUFE y NIT en el portal de la DIAN."""
 
 import time
 from pathlib import Path
 
+from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeout, sync_playwright
+
 from config import TIEMPO_MAXIMO_DESCARGA, URL_CONSULTA
 
 
-def _esperar_pdf_nuevo(
-    carpeta: Path,
-    archivos_previos: set[Path],
-    descargas_previas: set[Path],
-    tiempo_limite: int,
-) -> Path:
-    """Espera un único PDF nuevo y confirma que terminó de descargarse."""
+def _buscar_boton_pdf(pagina: Page) -> Locator | None:
+    """Detecta el enlace o botón de descarga de representación gráfica (PDF)."""
+    controles = pagina.locator("a, button")
+    for indice in range(controles.count()):
+        control = controles.nth(indice)
+        if not control.is_visible():
+            continue
+
+        texto = " ".join(
+            [
+                control.inner_text().strip(),
+                control.get_attribute("aria-label") or "",
+                control.get_attribute("title") or "",
+                control.get_attribute("href") or "",
+            ]
+        ).lower()
+
+        if "xml" not in texto and any(
+            clave in texto
+            for clave in ("pdf", "representación", "representacion", "gráfica", "grafica")
+        ):
+            return control
+    return None
+
+
+def _esperar_respuesta_consulta(pagina: Page, tiempo_limite: int) -> Locator:
+    """Espera a que Cloudflare o la persona valide el CAPTCHA y aparezca el PDF."""
     limite = time.monotonic() + tiempo_limite
-    ultimo_archivo = None
-    tamano_anterior = -1
-    lecturas_estables = 0
-
     while time.monotonic() < limite:
-        archivos_nuevos = [
-            archivo
-            for archivo in carpeta.glob("*.pdf")
-            if archivo.resolve() not in archivos_previos
-        ]
-        descargas_nuevas = [
-            archivo
-            for archivo in carpeta.glob("*.crdownload")
-            if archivo.resolve() not in descargas_previas
-        ]
+        boton = _buscar_boton_pdf(pagina)
+        if boton is not None:
+            return boton
+        pagina.wait_for_timeout(500)
 
-        if len(archivos_nuevos) > 1:
-            raise ValueError(
-                "Se encontraron varios PDF nuevos; no es posible asociarlos "
-                "con seguridad a este CUFE."
-            )
-
-        if len(archivos_nuevos) == 1 and not descargas_nuevas:
-            archivo = archivos_nuevos[0]
-            tamano_actual = archivo.stat().st_size
-            if archivo == ultimo_archivo and tamano_actual == tamano_anterior:
-                lecturas_estables += 1
-            else:
-                ultimo_archivo = archivo
-                tamano_anterior = tamano_actual
-                lecturas_estables = 0
-
-            if tamano_actual > 0 and lecturas_estables >= 2:
-                with archivo.open("rb") as pdf:
-                    if pdf.read(5) != b"%PDF-":
-                        raise ValueError(
-                            f"{archivo.name} no parece ser un archivo PDF válido."
-                        )
-                return archivo
-
-        time.sleep(0.5)
-
-    raise TimeoutError(
-        "No apareció un PDF nuevo en la carpeta indicada dentro del tiempo esperado."
+    raise PlaywrightTimeout(
+        "Tiempo agotado esperando la verificación del CAPTCHA o la respuesta de la DIAN."
     )
 
 
 def descargar_facturas(
-    cufes: list[str], carpeta_destino: Path
+    cufes: list[str], carpeta_destino: Path, nit: str
 ) -> tuple[list[Path], list[str], int]:
-    """Solicita consultas manuales y devuelve los PDF disponibles para procesar."""
+    """Consulta cada CUFE con su NIT, espera la validación y descarga el PDF."""
     carpeta_destino.mkdir(parents=True, exist_ok=True)
-    pdfs_disponibles = []
-    errores = []
+    pdfs_disponibles: list[Path] = []
+    errores: list[str] = []
     cufes_procesados = 0
 
-    for numero, cufe in enumerate(cufes, start=1):
-        cufes_procesados += 1
-        nombre_destino = carpeta_destino / f"factura_{numero:02}.pdf"
-        if nombre_destino.exists():
-            print(f"Se usará el PDF existente: {nombre_destino.name}")
-            pdfs_disponibles.append(nombre_destino)
-            continue
+    perfil_navegador = carpeta_destino.parent / ".perfil_chrome_dian"
+    perfil_navegador.mkdir(parents=True, exist_ok=True)
 
-        print(f"\nFactura {numero:02} de {len(cufes)}")
-        print(f"CUFE: {cufe}")
-        print(f"Consulta el documento en: {URL_CONSULTA}")
-        print(
-            "En el navegador normal, ingresa también el NIT y resuelve el CAPTCHA. "
-            "Descarga solo la representación gráfica en esta carpeta:"
+    with sync_playwright() as playwright:
+        contexto = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(perfil_navegador),
+            channel="chrome",
+            headless=False,
+            accept_downloads=True,
+            args=["--disable-blink-features=AutomationControlled"],
         )
-        print(carpeta_destino.resolve())
-        print("Cuando termine la descarga, vuelve aquí y presiona Enter.")
-
-        archivos_previos = {
-            archivo.resolve() for archivo in carpeta_destino.glob("*.pdf")
-        }
-        descargas_previas = {
-            archivo.resolve() for archivo in carpeta_destino.glob("*.crdownload")
-        }
-
         try:
-            input()
-            pdf_descargado = _esperar_pdf_nuevo(
-                carpeta_destino,
-                archivos_previos,
-                descargas_previas,
-                TIEMPO_MAXIMO_DESCARGA,
-            )
-            pdf_descargado.rename(nombre_destino)
-            pdfs_disponibles.append(nombre_destino)
-            print(f"PDF registrado: {nombre_destino.name}")
-        except EOFError:
-            mensaje = "Se canceló la entrada; no se procesaron más CUFE."
-            print(mensaje)
-            errores.append(mensaje)
-            break
-        except (OSError, TimeoutError, ValueError) as error:
-            mensaje = f"Factura {numero:02} ({cufe[:8]}...): {error}"
-            print(f"Error de consulta o descarga: {mensaje}")
-            errores.append(mensaje)
+            pagina = contexto.pages[0] if contexto.pages else contexto.new_page()
+
+            for numero, cufe in enumerate(cufes, start=1):
+                cufes_procesados += 1
+                nombre_destino = carpeta_destino / f"factura_{numero:02}.pdf"
+
+                if nombre_destino.exists():
+                    print(f"Se usará el PDF existente: {nombre_destino.name}")
+                    pdfs_disponibles.append(nombre_destino)
+                    continue
+
+                print(f"\nFactura {numero:02} de {len(cufes)} | CUFE: {cufe[:16]}...")
+
+                try:
+                    pagina.goto(URL_CONSULTA, wait_until="domcontentloaded")
+
+                    pagina.locator("#DocumentKey").fill(cufe)
+                    campo_nit = pagina.locator("#SearchDocumentNit")
+                    campo_nit.wait_for(state="visible", timeout=15_000)
+                    campo_nit.fill(nit)
+
+                    pagina.wait_for_timeout(2000)
+
+                    boton_buscar = pagina.locator("button.search-document")
+                    if boton_buscar.is_enabled():
+                        boton_buscar.click()
+
+                    print("Si Cloudflare solicita verificación, haz clic en la casilla en Chrome...")
+                    boton_pdf = _esperar_respuesta_consulta(pagina, TIEMPO_MAXIMO_DESCARGA)
+
+                    with pagina.expect_download(timeout=30_000) as descarga_info:
+                        boton_pdf.click()
+
+                    descarga_info.value.save_as(str(nombre_destino))
+
+                    with nombre_destino.open("rb") as pdf:
+                        if pdf.read(5) != b"%PDF-":
+                            nombre_destino.unlink(missing_ok=True)
+                            raise ValueError(
+                                f"{nombre_destino.name} no parece ser un archivo PDF válido."
+                            )
+
+                    pdfs_disponibles.append(nombre_destino)
+                    print(f"PDF descargado automáticamente: {nombre_destino.name}")
+
+                except (OSError, PlaywrightTimeout, ValueError) as error:
+                    mensaje = f"Factura {numero:02} ({cufe[:8]}...): {error}"
+                    print(f"Error de consulta o descarga: {mensaje}")
+                    errores.append(mensaje)
+        finally:
+            contexto.close()
 
     return pdfs_disponibles, errores, cufes_procesados

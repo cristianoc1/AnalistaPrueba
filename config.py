@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 URL_CONSULTA = "https://catalogo-vpfe.dian.gov.co/User/SearchDocument"
+URL_RECIBIDOS = "https://dian.gov.co"
+URL_EMITIDOS = "https://dian.gov.co"
 
 # Códigos suministrados en el documento de la prueba técnica
 CUFES = [
@@ -23,6 +25,8 @@ CUFES = [
 CARPETA_PROYECTO = Path(__file__).resolve().parent
 CARPETA_FACTURAS = CARPETA_PROYECTO / "facturas"
 CARPETA_RESULTADOS = CARPETA_PROYECTO / "resultados"
+ARCHIVO_SESION = CARPETA_PROYECTO / "sesion_dian.json"
 
-# Tiempo máximo para que se complete la descarga manual en la carpeta del proyecto
+# Tiempo máximo para que se complete la descarga en la carpeta del proyecto
 TIEMPO_MAXIMO_DESCARGA = 90
+

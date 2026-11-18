@@ -1,6 +1,9 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.pyc
+.perfil_chrome_dian/
+sesion_dian.json
 
 facturas/*.pdf
 resultados/*.csv

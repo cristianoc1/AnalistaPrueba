@@ -1,24 +1,26 @@
-# Consulta y extracción de facturas electrónicas
+# Consulta y extracción automatizada de facturas electrónicas (DIAN)
 
 ## Descripción
 
-El proyecto organiza el procesamiento de diez facturas electrónicas indicadas en la prueba técnica. Para cada CUFE, la persona realiza la consulta en el portal de la DIAN y descarga la representación gráfica en PDF. El programa registra cada descarga, extrae los datos solicitados y genera un archivo CSV por factura.
+Este proyecto implementa un flujo de automatización (RPA híbrido / *Human-in-the-Loop*) y extracción de datos para procesar diez facturas electrónicas en el portal público de la DIAN. El sistema automatiza la navegación web, el diligenciamiento de formularios (CUFE y NIT), la captura directa de las representaciones gráficas en PDF, el desbloqueo de documentos protegidos y la estructuración de sus ítems en archivos CSV individuales.
 
-## Alcance y limitación de la automatización
+## Arquitectura y decisión técnica (*Human-in-the-Loop*)
 
-La prueba solicita que un RPA consulte los CUFE, descargue los PDF y resuelva automáticamente el CAPTCHA. Durante la validación del portal, Cloudflare Turnstile mostró el mensaje **«La verificación falló»** en Chrome controlado por Selenium. Por esa razón, esta implementación no automatiza el control del navegador ni intenta resolver o evadir el CAPTCHA.
+Durante las pruebas iniciales con navegadores automatizados estándar (Selenium), el portal de la DIAN bloqueaba las consultas mediante **Cloudflare Turnstile**, mostrando el error *«La verificación falló»* al detectar entornos sin historial ni cookies reales (`navigator.webdriver = true`).
 
-La consulta y descarga deben realizarse manualmente en un navegador normal; el programa no abre Chrome ni controla el navegador. Para cada CUFE, muestra el código y la ruta de destino, y espera a que la persona consulte el documento, ingrese el NIT, resuelva el CAPTCHA y descargue la representación gráfica en `facturas`. Después, comprueba que haya un único PDF nuevo, espera a que su tamaño se estabilice y verifica su firma PDF antes de asignarle un nombre consecutivo. La extracción, la creación de los DataFrames, la exportación de los CSV y el cálculo de las métricas se ejecutan automáticamente. Si los PDF están protegidos, solicita una vez en la terminal el NIT compuesto solo por dígitos para poder leerlos; el dato no se guarda en el proyecto.
+Para resolver este bloqueo sin recurrir a servicios externos de evasión de CAPTCHA y manteniendo la estabilidad del flujo, se diseñó una arquitectura con **Playwright** apoyada en tres pilares:
 
-Por lo tanto, la consulta y descarga automáticas solicitadas en el primer punto no quedan cubiertas. La solución no presenta esta intervención manual como un RPA completo.
+1. **Perfil persistente y navegador nativo:** Se ejecuta Google Chrome instalado en el sistema (`channel="chrome"`) utilizando un contexto persistente (`.perfil_chrome_dian`) y suprimiendo las banderas de automatización (`--disable-blink-features=AutomationControlled`). Esto permite conservar la reputación de sesión y cookies entre consultas, reduciendo las interrupciones de Cloudflare.
+2. **Intervención mínima asistida:** El script diligencia automáticamente el **CUFE** y el **NIT** en cada iteración. Si Cloudflare valida en segundo plano, el sistema ejecuta la búsqueda y descarga el PDF sin intervención; si exige confirmación visual puntual, el flujo aguarda el clic del usuario en la casilla de verificación y retoma el control automáticamente en cuanto detecta el enlace del documento.
+3. **Captura directa de descargas y extracción estructurada:** Mediante la interceptación de eventos de descarga (`expect_download`), cada PDF se valida mediante su firma binaria (`%PDF-`), se renombra de forma consecutiva (`factura_01.pdf`, `factura_02.pdf`, etc.) y se procesa con **PyMuPDF** y expresiones regulares para generar los reportes CSV.
 
 ## Tecnologías
 
-- **Python 3:** flujo principal y manejo de archivos.
-- **Pandas:** creación de un DataFrame por factura y exportación a CSV.
-- **PyMuPDF:** extracción de texto seleccionable de los PDF.
-- **Regex (`re`):** identificación de campos y filas de producto.
-- **`pathlib` y `time`:** manejo de rutas y medición de tiempos.
+- **Python 3.10+:** Orquestación del flujo, manejo de rutas (`pathlib`) y medición de métricas (`time`).
+- **Playwright:** Automatización del navegador, gestión de contexto persistente e interceptación directa de descargas.
+- **PyMuPDF (`fitz`):** Autenticación de PDFs protegidos por contraseña y extracción de texto seleccionable.
+- **Expresiones Regulares (`re`):** Parsing de encabezados de factura y reconstrucción de filas de productos multilínea.
+- **Pandas:** Estructuración tabular de los datos extraídos y exportación a CSV en codificación UTF-8.
 
 ## Estructura del proyecto
 
@@ -35,77 +37,68 @@ Por lo tanto, la consulta y descarga automáticas solicitadas en el primer punto
 └── .gitignore
 ```
 
-- `main.py` coordina las consultas manuales, el procesamiento de PDF y las métricas.
-- `automatizacion.py` presenta cada CUFE, espera la descarga manual, verifica el archivo y le asigna un nombre consecutivo.
-- `extraccion.py` extrae los datos generales y productos, crea los DataFrames y exporta los CSV.
-- `config.py` contiene los CUFE, la dirección del portal, las rutas y los límites de espera.
-- `facturas/` almacena las representaciones gráficas descargadas.
-- `resultados/` almacena los CSV generados.
+- `main.py`: Punto de entrada. Solicita el NIT una única vez, coordina la etapa de descarga con la de extracción y calcula las métricas de rendimiento.
+- `automatizacion.py`: Controla Google Chrome mediante Playwright, rellena el CUFE y el NIT, espera la validación de Cloudflare y captura los PDF descargados.
+- `extraccion.py`: Desbloquea los PDF protegidos usando el NIT, extrae los datos generales y los ítems facturados, y exporta un archivo CSV por documento.
+- `config.py`: Centraliza la lista de CUFE, la URL del portal de la DIAN, las rutas de trabajo y los tiempos de espera.
+- `facturas/`: Directorio local donde se almacenan los PDF descargados.
+- `resultados/`: Directorio local donde se generan los archivos CSV procesados.
 
 ## Requisitos e instalación
 
-Se requiere Python 3.10 o posterior.
+Se requiere **Python 3.10 o superior** y **Google Chrome** instalado en el equipo.
 
-Desde la carpeta del proyecto, se puede crear y preparar un entorno virtual con:
+1. Clonar el repositorio y crear el entorno virtual:
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
+2. Instalar las dependencias del proyecto:
+   ```powershell
+   python -m pip install -r requirements.txt
+   ```
 
 ## Ejecución
+
+Para iniciar el proceso completo, ejecutar:
 
 ```powershell
 python main.py
 ```
 
-Para cada CUFE, el programa lo presenta en la consola y espera a que se complete la consulta manual:
-
-1. Abrir el portal de consulta de documentos de la DIAN en un navegador normal: <https://catalogo-vpfe.dian.gov.co/User/SearchDocument>.
-2. Copiar el CUFE mostrado en la consola y realizar la consulta.
-3. Resolver el CAPTCHA en el navegador cuando el portal lo solicite.
-4. Descargar únicamente la representación gráfica de esa factura en la ruta `facturas` que muestra la consola. Si el navegador la guarda en otra ubicación, muévela a `facturas`.
-5. Esperar a que termine la descarga y presionar Enter en la consola.
-
-El programa comprueba que haya un único PDF nuevo, lo nombra `factura_01.pdf`, `factura_02.pdf`, etc., y continúa con el siguiente CUFE. Después de presionar Enter, espera hasta 90 segundos a que aparezca el archivo; si no aparece, informa el error y continúa con el siguiente CUFE. No sobrescribe archivos consecutivos existentes; en ejecuciones posteriores reutiliza los PDF que ya estén en `facturas`. Al completar las consultas, solicita el NIT si hay PDF para procesar, extrae su contenido y guarda un CSV por factura en `resultados`.
-
-Si una consulta falla, no se descarga un PDF o aparecen varios PDF nuevos a la vez, el error se informa y el proceso continúa con el siguiente CUFE. Los archivos que no se hayan podido asociar a una consulta deben revisarse antes de volver a ejecutar el proceso.
+### Flujo paso a paso
+1. **Ingreso único de credenciales:** La consola solicita el **NIT** (solo dígitos) del emisor o receptor. Este valor se reutiliza automáticamente tanto para las consultas web como para desbloquear los PDF protegidos.
+2. **Consulta y descarga automatizada:** Se abre una ventana de Google Chrome con perfil persistente. Para cada CUFE, el script navega al portal, completa los campos y espera a que la verificación de seguridad se complete (requiriendo únicamente un clic humano si Cloudflare lo solicita en pantalla).
+3. **Validación y almacenamiento:** Al aparecer la opción de descarga, Playwright intercepta el archivo, verifica su integridad (`%PDF-`) y lo guarda en `facturas/` con nombre consecutivo. Si un PDF ya existe de una ejecución previa, se reutiliza sin volver a descargarlo.
+4. **Extracción y exportación:** Finalizadas las descargas, el motor de extracción procesa cada documento y genera su respectivo archivo `factura_XX.csv` en la carpeta `resultados/`.
 
 ## Datos extraídos
 
-Cada CSV contiene las siguientes columnas:
+Cada archivo CSV generado contiene la siguiente estructura:
 
 | Columna | Descripción |
 | --- | --- |
-| `numero_factura` | Número de la factura |
-| `fecha_emision` | Fecha de emisión |
+| `numero_factura` | Número o prefijo y consecutivo de la factura |
+| `fecha_emision` | Fecha de emisión del documento |
 | `nit_emisor` | NIT del emisor o vendedor |
-| `codigo` | Código del producto |
-| `descripcion` | Descripción del producto |
+| `codigo` | Código interno o estándar del producto |
+| `descripcion` | Descripción completa del ítem (uniendo líneas continuas) |
 | `cantidad` | Cantidad facturada |
-| `precio_unitario` | Precio unitario |
+| `precio_unitario` | Valor unitario del producto |
 
-Cada fila representa un producto e incluye los datos generales de su factura. Las descripciones que continúan en la siguiente línea se unen antes de procesar la fila. Los campos que no se identifican se dejan vacíos y se informan en consola; no se completan con valores supuestos. Los archivos CSV se guardan en UTF-8.
+Cada fila corresponde a un producto e incluye los datos de cabecera de su factura. Si algún campo no puede identificarse con certeza, se deja vacío y se reporta una advertencia en consola para evitar datos supuestos.
 
 ## Métricas
 
-Al finalizar, el programa presenta:
+Al finalizar la ejecución, la consola presenta un resumen operativo con:
 
-- CUFE atendidos y PDF disponibles para procesar.
-- PDF procesados y CSV generados.
-- Cantidad de errores.
-- Tiempo empleado en las consultas y descargas manuales.
-- Tiempo de extracción y exportación.
-- Tiempo total y promedio por CUFE atendido.
+- Total de CUFE procesados y PDFs disponibles.
+- Cantidad de PDFs procesados y archivos CSV generados.
+- Registro detallado de errores o campos faltantes.
+- Tiempo invertido en consulta/descarga, tiempo de extracción/exportación, tiempo total y promedio por factura.
 
-Los tiempos se miden durante la ejecución e incluyen la espera mientras se realizan las consultas manuales.
+## Consideraciones y restricciones
 
-## Restricciones
-
-- La resolución automática del CAPTCHA no está implementada; Cloudflare rechazó la verificación en el navegador controlado por Selenium.
-- La consulta y descarga manuales son necesarias para obtener los PDF sin automatizar ni evadir el control del portal.
-- Los PDF protegidos requieren el NIT correspondiente para permitir la extracción de texto.
-- PyMuPDF requiere texto seleccionable. Los PDF que solo contienen imágenes se reportan como no procesables; no se incluye OCR.
-- La extracción depende de la estructura del texto de cada factura. Se deben revisar los campos faltantes que informe el programa.
-- Los PDF y CSV generados se excluyen del control de versiones mediante `.gitignore`.
+- **Seguridad y privacidad:** El NIT ingresado en consola se mantiene únicamente en memoria durante la ejecución y no se almacena en archivos de configuración. Los PDFs, los CSVs y el directorio `.perfil_chrome_dian/` están excluidos del control de versiones mediante `.gitignore`.
+- **Lectura de PDF:** El módulo de extracción utiliza PyMuPDF sobre texto seleccionable; documentos escaneados como imagen requerirían la integración adicional de un motor OCR.
